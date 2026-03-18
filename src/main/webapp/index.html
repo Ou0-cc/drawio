@@ -1,3 +1,9 @@
+<!-- 
+  NOTICE: This file has been modified by ou0.cc on 2026-03-18.
+  Original source: https://github.com/jgraph/drawio
+  Changes: Added custom footer, branding and non-affiliation disclaimer, as well as Plausible integration.
+-->
+
 <!DOCTYPE html>
 <html>
 <head>
@@ -15,7 +21,7 @@
 	<meta name="msapplication-config" content="images/browserconfig.xml">
     <meta name="mobile-web-app-capable" content="yes">
 	<meta name="theme-color" content="#d89000">
-    <link rel="canonical" href="https://app.diagrams.net">
+    <link rel="canonical" href="https://ou0.cc/flowchart-maker">
 	<link rel="manifest" href="images/manifest.json">
 	<link rel="icon" href="favicon.ico" sizes="any">
 	<link rel="shortcut icon" href="favicon.ico">
@@ -23,6 +29,10 @@
     <link rel="stylesheet" type="text/css" href="styles/grapheditor.css">
 	<link rel="stylesheet" media="(forced-colors: active)" href="styles/high-contrast.css" id="high-contrast-stylesheet">
 	<script src="js/bootstrap.js"></script>
+	<!-- Privacy-friendly analytics by Plausible -->
+	<script async src="https://plausible.canine.tools/js/pa-cYINZuTutb8ZSb0A6zsju.js"></script>
+	<script>if (!localStorage.getItem('disablePlausible')) {window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};	plausible.init()} else {console.log('Plausible statistics disabled');}</script>
+
 	<style type="text/css">
 		.geBlock {
 			z-index:-3;
@@ -36,6 +46,13 @@
 		.geBlock h1, .geBlock h2 {
 			margin-top:0px;
 			padding-top:0px;
+		}
+		.footerInfo {
+			font-size:0.8em;
+			color:#666;
+		}
+		.footerInfo a {
+			color:#666;
 		}
 	</style>
 </head>
@@ -51,6 +68,16 @@
 		<p>
 			Please ensure JavaScript is enabled.
 		</p>
+
+	<p class="footerInfo">
+		This tool is a self-hosted instance of the 
+		<a href="https://github.com/jgraph/drawio" target="_blank" rel="noopener">draw.io</a> 
+		open-source project. Modified by <strong>ou0.cc</strong>. 
+		Licensed under the <a href="https://www.apache.org/licenses/LICENSE-2.0" target="_blank" rel="noopener">Apache License 2.0</a>.
+		<br>
+		<em>Disclaimer: This site is not affiliated with, endorsed by, or sponsored by draw.io or its owners. 
+		All trademarks remain the property of their respective owners.</em>
+	</p>
 	</div>
 </div>
 <script src="js/main.js"></script>
