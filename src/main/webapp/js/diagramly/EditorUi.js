@@ -2481,21 +2481,58 @@
 					filename = basename + '.jpg';
 				}
 				
-				this.saveRequest(filename, format, mxUtils.bind(this, function(newTitle, base64)
+				if (urlParams['embed'] == '1' && urlParams['proto'] == 'json' && this.embedExportProtocol)
 				{
-					try
+					var parent = this.embedMessageSource || window.opener || window.parent;
+
+					if (this.spinner.spin(document.body, mxResources.get('exporting')))
 					{
-						var req = this.createDownloadRequest(newTitle, format, ignoreSelection, base64,
+						var req = this.createDownloadRequest(filename, format, ignoreSelection, '1',
 							transparent, currentPage, scale, border, grid, includeXml, pageRange, w, h,
 							!pageVisible, margin, fit, sheetsAcross, sheetsDown, shadows);
-						
-						return req;
+
+						req.send(mxUtils.bind(this, function(req)
+						{
+							this.spinner.stop();
+
+							if (req.getStatus() >= 200 && req.getStatus() <= 299)
+							{
+								var msg = this.createLoadMessage('export');
+								msg.format = format;
+								msg.filename = filename;
+								msg.data = 'data:application/pdf;base64,' + req.getText();
+								msg.xml = this.getFileData(true);
+								parent.postMessage(JSON.stringify(msg), '*');
+							}
+							else
+							{
+								this.handleError({message: mxResources.get('errorSavingFile')});
+							}
+						}), mxUtils.bind(this, function()
+						{
+							this.spinner.stop();
+							this.handleError({message: mxResources.get('errorSavingFile')});
+						}));
 					}
-					catch (e)
+				}
+				else
+				{
+					this.saveRequest(filename, format, mxUtils.bind(this, function(newTitle, base64)
 					{
-						this.handleError(e);
-					}
-				}));
+						try
+						{
+							var req = this.createDownloadRequest(newTitle, format, ignoreSelection, base64,
+								transparent, currentPage, scale, border, grid, includeXml, pageRange, w, h,
+								!pageVisible, margin, fit, sheetsAcross, sheetsDown, shadows);
+
+							return req;
+						}
+						catch (e)
+						{
+							this.handleError(e);
+						}
+					}));
+				}
 			}
 		}
 		catch (e)
@@ -5968,6 +6005,19 @@
 	 */
 	EditorUi.prototype.saveData = function(filename, format, data, mime, base64Encoded, defaultMode)
 	{
+		if (urlParams['embed'] == '1' && urlParams['proto'] == 'json' && this.embedExportProtocol)
+		{
+			var parent = this.embedMessageSource || window.opener || window.parent;
+			var msg = this.createLoadMessage('export');
+			msg.format = format;
+			msg.filename = filename;
+			msg.data = base64Encoded ? 'data:' + mime + ';base64,' + data : data;
+			msg.xml = this.getFileData(true);
+			parent.postMessage(JSON.stringify(msg), '*');
+
+			return;
+		}
+
 		if (this.isLocalFileSave())
 		{
 			this.saveLocalFile(data, filename, mime, base64Encoded, format, defaultMode);
@@ -8762,6 +8812,11 @@
 		for (var i = 0; i < pages.length; i++)
 		{
 			this.updatePageLinksForCell(mapping, pages[i].root);
+
+			if (pages[i] != this.currentPage)
+			{
+				pages[i].needsUpdate = true;
+			}
 
 			if (pages[i].viewState != null && this.updateBackgroundPageLink(
 				mapping, pages[i].viewState.backgroundImage))
@@ -12596,16 +12651,33 @@
 					
 				    if (files.length > 0)
 				    {
-						if (urlParams['embed'] != '1' && mxEvent.isShiftDown(evt))
+						var isBlankNoUndo = this.isBlankFile() && !this.canUndo();
+						var isDiagramFile = files.length == 1 && (EditorUi.isVisioFilename(files[0].name) ||
+							/(\.drawio)$/i.test(files[0].name) || /(\.xml)$/i.test(files[0].name));
+
+						if (urlParams['embed'] != '1' && isBlankNoUndo &&
+							(isDiagramFile || mxEvent.isShiftDown(evt)))
 						{
-							// Closes current file if blank and no undoable changes
-							if (this.isBlankFile() && !this.canUndo() &&
-								this.getCurrentFile() != null)
+							// Opens file in same window when dropped on unmodified file
+							// Uses noDialogs to prevent fileLoaded(null) from
+							// creating a new blank file asynchronously
+							var file = this.getCurrentFile();
+
+							if (file == null || !file.isModified())
 							{
-								this.fileLoaded(null);
+								this.fileLoaded(null, true);
 							}
 
-							this.openFiles(files, true);
+							// Marks file as changed after loading to trigger draft save
+							this.openFiles(files, true, mxUtils.bind(this, function()
+							{
+								var file = this.getCurrentFile();
+
+								if (file != null)
+								{
+									file.fileChanged();
+								}
+							}));
 						}
 						else
 				    	{
@@ -12614,7 +12686,7 @@
 								x = null;
 								y = null;
 							}
-							
+
 							this.importFiles(files, x, y, this.maxImageSize, null, null, null,
 								null, mxEvent.isControlDown(evt), null, null,
 								mxEvent.isShiftDown(evt), evt);
@@ -14120,17 +14192,38 @@
 			prevSetLocation.call(this, x, y);
 		};
 
-		// Wrap setSize to prevent resize while docked
+		// Wrap setSize to update dock offsets and re-pin after resize.
+		// When docked, bypass prevSetSize (viewport clamping assumes
+		// rightward/downward growth) and call mxWindow.prototype.setSize
+		// directly; pinToEdge handles positioning.
 		var prevSetSize = wnd.setSize;
 
 		wnd.setSize = function(w, h)
 		{
 			if (this.dockState != null)
 			{
-				return;
-			}
+				mxWindow.prototype.setSize.call(this, w, h);
 
-			prevSetSize.call(this, w, h);
+				// Update dock offsets to reflect new size so that
+				// pinToEdge keeps the correct edges fixed
+				var iw = window.innerWidth || document.documentElement.clientWidth ||
+					document.body.clientWidth;
+				var ih = window.innerHeight || document.documentElement.clientHeight ||
+					document.body.clientHeight;
+				var newW = parseInt(this.div.style.width);
+				var newH = parseInt(this.div.style.height);
+				var x = this.getX();
+				var y = this.getY();
+
+				this._dockOffsetX = this._dockAnchorRight ? (iw - x - newW) : x;
+				this._dockOffsetY = this._dockAnchorBottom ? (ih - y - newH) : y;
+
+				dockManager.pinToEdge(this);
+			}
+			else
+			{
+				prevSetSize.call(this, w, h);
+			}
 		};
 
 		// Dock detection via move events
@@ -14182,6 +14275,121 @@
 			}
 
 			candidateDockZone = null;
+		});
+
+		// Move resize handle to the opposite corner when docked
+		wnd.addListener(mxEvent.DOCK, function(sender, evt)
+		{
+			if (wnd.resize == null)
+			{
+				return;
+			}
+
+			var zone = evt.getProperty('side');
+			var flipX = zone.indexOf('right') >= 0;
+			var flipY = zone.indexOf('bottom') >= 0;
+
+			if (!flipX && !flipY)
+			{
+				return;
+			}
+
+			// Remove existing resize element and its handlers
+			var oldResize = wnd.resize;
+			oldResize.parentNode.removeChild(oldResize);
+			wnd.resize = null;
+
+			// Create new resize element at the opposite corner
+			var resize = document.createElement('img');
+			resize.style.position = 'absolute';
+			resize.style.zIndex = '2';
+			resize.setAttribute('src', mxWindow.prototype.resizeImage);
+
+			if (flipX)
+			{
+				resize.style.left = '0px';
+			}
+			else
+			{
+				resize.style.right = '0px';
+			}
+
+			if (flipY)
+			{
+				resize.style.top = '0px';
+			}
+			else
+			{
+				resize.style.bottom = '0px';
+			}
+
+			resize.style.cursor = (flipX != flipY) ? 'nesw-resize' : 'nwse-resize';
+
+			var startX = null;
+			var startY = null;
+			var width = null;
+			var height = null;
+
+			var start = function(evt)
+			{
+				wnd.activate();
+				startX = mxEvent.getClientX(evt);
+				startY = mxEvent.getClientY(evt);
+				width = wnd.div.offsetWidth;
+				height = wnd.div.offsetHeight;
+
+				mxEvent.addGestureListeners(document, null, dragHandler, dropHandler);
+				wnd.fireEvent(new mxEventObject(mxEvent.RESIZE_START, 'event', evt));
+				mxEvent.consume(evt);
+			};
+
+			var dragHandler = function(evt)
+			{
+				if (startX != null && startY != null)
+				{
+					var dx = mxEvent.getClientX(evt) - startX;
+					var dy = mxEvent.getClientY(evt) - startY;
+
+					wnd.setSize(flipX ? (width - dx) : (width + dx),
+						flipY ? (height - dy) : (height + dy));
+
+					wnd.fireEvent(new mxEventObject(mxEvent.RESIZE, 'event', evt));
+					mxEvent.consume(evt);
+				}
+			};
+
+			var dropHandler = function(evt)
+			{
+				if (startX != null && startY != null)
+				{
+					startX = null;
+					startY = null;
+					mxEvent.removeGestureListeners(document, null, dragHandler, dropHandler);
+					wnd.fireEvent(new mxEventObject(mxEvent.RESIZE_END, 'event', evt));
+					mxEvent.consume(evt);
+				}
+			};
+
+			mxEvent.addGestureListeners(resize, start, dragHandler, dropHandler);
+			wnd.div.appendChild(resize);
+			wnd.resize = resize;
+			wnd._dockResize = true;
+		});
+
+		// Restore default resize handle on undock
+		wnd.addListener(mxEvent.UNDOCK, function(sender, evt)
+		{
+			if (wnd._dockResize)
+			{
+				if (wnd.resize != null)
+				{
+					wnd.resize.parentNode.removeChild(wnd.resize);
+					wnd.resize = null;
+				}
+
+				wnd.setResizable(true);
+				wnd._dockResize = false;
+			}
 		});
 
 		// Re-pin after minimize/normalize changes height
@@ -15606,7 +15814,7 @@
 	};
 
 	/**
-	 * Copies the given cells and XML to the clipboard as an embedded image.
+	 * Copies the given cells to the clipboard as an SVG image.
 	 */
 	EditorUi.prototype.copySvg = function(cells, xml, scale)
 	{
@@ -15618,7 +15826,12 @@
 				var svgRoot = graph.getSvg(null, scale, null, null, null, null,
 					null, null, null, null, null, null, null,
 					(cells.length > 0) ? cells : null);
-				svgRoot.setAttribute('content', xml);
+
+				if (xml != null)
+				{
+					svgRoot.setAttribute('content', xml);
+				}
+
 				var dataUrl = Editor.createSvgDataUri(mxUtils.getXml(svgRoot));
 				var w = parseInt(svgRoot.getAttribute('width'));
 				var h = parseInt(svgRoot.getAttribute('height'));
@@ -15637,7 +15850,7 @@
 	};
 
 	/**
-	 * Copies the given cells and XML to the clipboard as an embedded image.
+	 * Copies the given cells to the clipboard as a PNG image.
 	 */
 	EditorUi.prototype.copyImage = function(cells, xml, scale)
 	{
@@ -15656,11 +15869,11 @@
 						var dataUrl = this.createImageDataUri(canvas, xml, 'png');
 						var w = Math.round(parseInt(svgRoot.getAttribute('width')) / scale);
 						var h = Math.round(parseInt(svgRoot.getAttribute('height')) / scale);
-						
+
 						EditorUi.debug('EditorUi.copyImage', [this],
 							'cells', [cells], 'xml', [xml],
 							'scale', [scale]);
-						
+
 						this.writeImageToClipboard(dataUrl, w, h, 'image/png', null,
 							mxUtils.bind(this, function()
 							{
@@ -16905,7 +17118,7 @@
 				pv.addGraphFragment = function(dx, dy, scale, pageNumber, div, clip)
 				{
 					printPreviewAddGraphFragment.apply(this, arguments);
-					
+
 					if (this.graph.mathEnabled)
 					{
 						this.mathEnabled = this.mathEnabled || true;
@@ -17172,7 +17385,18 @@
 			}
 			
 			pv.closeDocument();
-			
+
+			// Expands fill patterns to inline geometry for vector PDF output
+			if (Editor.expandPatternsForPrint && pv.wnd != null)
+			{
+				var svgs = pv.wnd.document.getElementsByTagName('svg');
+
+				for (var i = 0; i < svgs.length; i++)
+				{
+					Editor.expandSvgPatterns(svgs[i]);
+				}
+			}
+
 			// Rewrites page links to point to internal anchors
 			Graph.rewritePageLinks(pv.wnd.document, true);
 			
@@ -17439,7 +17663,7 @@
 	/**
 	 * Opens the given files in the editor.
 	 */
-	EditorUi.prototype.openFileHandle = function(data, name, file, temp, fileHandle, editable)
+	EditorUi.prototype.openFileHandle = function(data, name, file, temp, fileHandle, editable, done)
 	{
 		if (name != null && name.length > 0)
 		{
@@ -17474,7 +17698,7 @@
 					{
 						this.openLocalFile(this.emptyDiagramXml, this.defaultFilename, temp);
 					}
-				
+
     				try
 	    			{
     					this.loadLibrary(new LocalLibrary(this, xml, name));
@@ -17487,7 +17711,7 @@
 				}
 				else
 				{
-					this.openLocalFile(xml, name, temp);
+					this.openLocalFile(xml, name, temp, null, null, null, done);
 				}
 			});
 			
@@ -17548,7 +17772,7 @@
 				this.convertLucidChart(data, mxUtils.bind(this, function(xml)
 				{
 					this.spinner.stop();
-					this.openLocalFile(xml, name, temp);
+					this.openLocalFile(xml, name, temp, null, null, null, done);
 				}), mxUtils.bind(this, function(e)
 				{
 					this.spinner.stop();
@@ -17584,7 +17808,7 @@
 				}), mxUtils.bind(this, function()
 				{
 					this.spinner.stop();
-					this.openLocalFile(data, name, temp);
+					this.openLocalFile(data, name, temp, null, null, null, done);
 				}));
 			}
 			else
@@ -17607,7 +17831,7 @@
 				
 				this.spinner.stop();
 				this.openLocalFile(data, name, temp, fileHandle,
-					(fileHandle != null) ? file : null, editable);
+					(fileHandle != null) ? file : null, editable, done);
 			}
 		}
 	};
@@ -17615,7 +17839,7 @@
 	/**
 	 * Opens the given files in the editor.
 	 */
-	EditorUi.prototype.openFiles = function(files, temp)
+	EditorUi.prototype.openFiles = function(files, temp, done)
 	{
 		if (this.spinner.spin(document.body, mxResources.get('loading')))
 		{
@@ -17624,26 +17848,27 @@
 				(mxUtils.bind(this, function(file)
 				{
 					var reader = new FileReader();
-				
+
 					reader.onload = mxUtils.bind(this, function(e)
 					{
 						try
 						{
-							this.openFileHandle(e.target.result, file.name, file, temp);
+							this.openFileHandle(e.target.result, file.name, file,
+								temp, null, null, done);
 						}
 						catch (e)
 						{
 							this.handleError(e);
 						}
 					});
-					
+
 					reader.onerror = mxUtils.bind(this, function(e)
 					{
 						this.spinner.stop();
 						this.handleError(e);
 						window.openFile = null;
 					});
-					
+
 					if ((file.type.substring(0, 5) === 'image' ||
 						file.type === 'application/pdf') &&
 						file.type.substring(0, 9) !== 'image/svg')
@@ -17662,18 +17887,18 @@
 	/**
 	 * Shows the layers dialog if the graph has more than one layer.
 	 */
-	EditorUi.prototype.openLocalFile = function(data, name, temp, fileHandle, desc, editable)
+	EditorUi.prototype.openLocalFile = function(data, name, temp, fileHandle, desc, editable, done)
 	{
 		var currentFile = this.getCurrentFile();
-		
+
 		var fn = mxUtils.bind(this, function()
 		{
 			window.openFile = null;
-			
+
 			if (name == null && this.getCurrentFile() != null && this.isDiagramEmpty())
 			{
 				var doc = mxUtils.parseXml(data);
-				
+
 				if (doc != null)
 				{
 					this.editor.setGraphXml(doc.documentElement);
@@ -17685,6 +17910,11 @@
 				this.fileLoaded(new LocalFile(this, data,
 					name || this.defaultFilename, temp,
 					fileHandle, desc, editable));
+			}
+
+			if (done != null)
+			{
+				done();
 			}
 		});
 
@@ -17708,7 +17938,7 @@
 					window.openFile = null;
 				});
 				
-				window.openFile.setData(data, name);
+				window.openFile.setData(data, name, temp);
 				window.geOpenWindow(this.getUrl(), null, mxUtils.bind(this, function()
 				{
 					if (currentFile != null && currentFile.isModified())
@@ -18074,6 +18304,7 @@
 		var ignoreChange = false;
 		var autosave = false;
 		var lastData = null;
+		var embedShadowPages = null;
 		
 		var updateStatus = mxUtils.bind(this, function(sender, eventObject)
 		{
@@ -18830,6 +19061,10 @@
 					{
 						convertToSketch = data.toSketch;
 						autosave = data.autosave == 1;
+						this.embedDiffSync = data.diffSync != null && data.diffSync !== false;
+						this.embedDiffSyncPatchOnly = (typeof data.diffSync === 'object' &&
+							data.diffSync != null && data.diffSync.patchOnly == true);
+						this.embedExportProtocol = data.exportProtocol == true;
 						var sourceMetadata = data.sourceMetadata || null;
 						this.hideDialog();
 						
@@ -19103,23 +19338,129 @@
 					else if (data.action == 'merge')
 					{
 						var file = this.getCurrentFile();
-						
+
 						if (file != null)
 						{
 							var tmp = extractDiagramXml(data.xml);
 
 							if (tmp != null && tmp != '')
 							{
-								file.mergeFile(new LocalFile(this, tmp), function()
+								file.mergeFile(new LocalFile(this, tmp), mxUtils.bind(this, function()
 								{
+									// Reset shadow after merge when diff sync is enabled
+									if (this.embedDiffSync)
+									{
+										embedShadowPages = this.clonePages(this.pages);
+										lastData = getData();
+									}
+
 									parent.postMessage(JSON.stringify({event: 'merge', message: data}), '*');
-								}, function(err)
+								}), function(err)
 								{
 									parent.postMessage(JSON.stringify({event: 'merge', message: data, error: err}), '*');
 								});
 							}
 						}
-						
+
+						return;
+					}
+					else if (data.action == 'patch')
+					{
+						var file = this.getCurrentFile();
+
+						if (file != null && data.patch != null)
+						{
+							try
+							{
+								ignoreChange = true;
+								file.patch([data.patch]);
+
+								// Update shadow to reflect the patched state
+								if (this.embedDiffSync && embedShadowPages != null)
+								{
+									embedShadowPages = this.applyPatches(
+										embedShadowPages, [data.patch]);
+								}
+
+								lastData = getData();
+								ignoreChange = false;
+
+								// Send acknowledgment with checksum
+								var resp = {event: 'patch', message: data};
+								var currentChecksum = this.getHashValueForPages(this.pages);
+								resp.checksum = currentChecksum;
+
+								if (data.checksum != null && data.checksum != currentChecksum)
+								{
+									resp.checksumMismatch = true;
+								}
+
+								parent.postMessage(JSON.stringify(resp), '*');
+							}
+							catch (e)
+							{
+								ignoreChange = false;
+								parent.postMessage(JSON.stringify({event: 'patch',
+									message: data, error: e.message || e.toString()}), '*');
+							}
+						}
+
+						return;
+					}
+					else if (data.action == 'getDiff')
+					{
+						var msg = {event: 'getDiff', message: data};
+
+						if (this.embedDiffSync && embedShadowPages != null)
+						{
+							var currentPages = this.clonePages(this.pages);
+							msg.patch = this.diffPages(embedShadowPages, currentPages);
+							msg.checksum = this.getHashValueForPages(currentPages);
+						}
+						else
+						{
+							msg.xml = getData();
+						}
+
+						parent.postMessage(JSON.stringify(msg), '*');
+
+						return;
+					}
+					else if (data.action == 'resetDiff')
+					{
+						if (this.embedDiffSync)
+						{
+							if (data.xml != null)
+							{
+								var tmp = extractDiagramXml(data.xml);
+								var file = this.getCurrentFile();
+
+								if (tmp != null && tmp != '' && file != null)
+								{
+									file.mergeFile(new LocalFile(this, tmp), mxUtils.bind(this, function()
+									{
+										embedShadowPages = this.clonePages(this.pages);
+										lastData = getData();
+										parent.postMessage(JSON.stringify({event: 'resetDiff',
+											message: data, checksum: this.getHashValueForPages(
+											this.pages)}), '*');
+									}), function(err)
+									{
+										parent.postMessage(JSON.stringify({event: 'resetDiff',
+											message: data, error: err}), '*');
+									});
+								}
+							}
+							else
+							{
+								embedShadowPages = this.clonePages(this.pages);
+								lastData = getData();
+								parent.postMessage(JSON.stringify({event: 'resetDiff',
+									message: data, checksum: this.getHashValueForPages(
+									this.pages)}), '*');
+							}
+						}
+
 						return;
 					}
 					else if (data.action == 'remoteInvokeReady') 
@@ -19178,21 +19519,55 @@
 
 				lastData = getData();
 
+				// Initialize shadow pages for diff-based sync
+				if (this.embedDiffSync)
+				{
+					embedShadowPages = this.clonePages(this.pages);
+				}
+
 				if (autosave && changeListener == null)
 				{
 					changeListener = mxUtils.bind(this, function(sender, eventObject)
 					{
 						var data = getData();
-						
+
 						if (data != lastData && !ignoreChange)
 						{
 							var msg = this.createLoadMessage('autosave');
-							msg.xml = data;
 							msg.message = message;
+
+							if (this.embedDiffSync && embedShadowPages != null)
+							{
+								var currentPages = this.clonePages(this.pages);
+								var patch = this.diffPages(embedShadowPages, currentPages);
+
+								if (!mxUtils.isEmptyObject(patch))
+								{
+									msg.patch = patch;
+									msg.checksum = this.getHashValueForPages(currentPages);
+
+									if (!this.embedDiffSyncPatchOnly)
+									{
+										msg.xml = data;
+									}
+								}
+								else
+								{
+									// No structural changes but data changed
+									msg.xml = data;
+								}
+
+								embedShadowPages = currentPages;
+							}
+							else
+							{
+								msg.xml = data;
+							}
+
 							var parent = this.embedMessageSource || window.opener || window.parent;
 							parent.postMessage(JSON.stringify(msg), '*');
 						}
-						
+
 						lastData = data;
 					});
 					
@@ -19227,6 +19602,12 @@
 
 					// Attaches XML to response
 					resp.xml = data;
+
+					// Include checksum when diff sync is enabled
+					if (this.embedDiffSync && this.pages != null)
+					{
+						resp.checksum = this.getHashValueForPages(this.pages);
+					}
 
 					parent.postMessage(JSON.stringify(resp), '*');
 				}
